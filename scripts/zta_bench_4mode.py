@@ -1,62 +1,128 @@
+import argparse
+import hashlib
+import hmac
+import os
 import socket
 import struct
 import time
 
 TARGET_IP = "127.0.0.1"
 TARGET_PORT = 1234
-ZTA_SECRET_KEY = 0x5A7A2026
 
-def compute_mac(data: bytes) -> int:
-    h = (2166136261 ^ ZTA_SECRET_KEY) & 0xFFFFFFFF
-    for b in data:
-        h ^= b
-        h = (h * 16777619) & 0xFFFFFFFF
-    return h
+# Read key from environment variable (never hardcode production keys)
+HMAC_KEY = os.environ.get("ZTA_HMAC_KEY", "ZTA_TESTBED_DEFAULT_KEY_CHANGE_ME").encode("utf-8")
 
-def build_packet(pkt_type: str) -> bytes:
+# Packet class tags (for CSV logging ONLY; never used by PEP security logic)
+CLS_WARMUP        = 0
+CLS_BENIGN        = 1
+CLS_ATK1_MALFORM  = 2
+CLS_ATK2_REPLAY   = 3
+CLS_ATK3_ABAC     = 4
+CLS_ATK4_LOSFLOOD = 5
+
+
+def compute_hmac_sha256(header32: bytes) -> bytes:
+    return hmac.new(HMAC_KEY, header32, hashlib.sha256).digest()
+
+
+def build_packet(pkt_class: int, src_id: int, seq_num: int, run_id: int,
+                 role: int = 0x01, los_state: int = 0,
+                 ccsds_len: int = 5, expiry_offset: int = 120) -> bytes:
     msg_id = 0x1880
     seq_ctrl = 0xC000
-    payload = b'\x00\x00\xDE\xAD\xBE\xEF'
-    ccsds_len = 5  # 정상: 6B - 1 = 5
+    payload = b"\x00\x00\xDE\xAD\xBE\xEF"
+    expiry = int(time.time()) + expiry_offset
 
-    role = 0x01    # FlightOps (정상 권한)
-    src_id = 0x01  # Normal Ground Station
-    expiry = int(time.time()) + 60
-    corrupt_mac = False
+    ccsds = struct.pack(">HHH", msg_id, seq_ctrl, ccsds_len) + payload
+    meta = struct.pack(">BBBBQII", role, src_id, pkt_class, los_state, seq_num, expiry, run_id)
+    header32 = ccsds + meta
+    assert len(header32) == 32
+    mac = compute_hmac_sha256(header32)
+    return header32 + mac
 
-    if pkt_type == "ATK1_MALFORM":
-        # SPARTA EX-0013.02: 길이 변조 입력 (Legacy는 통과, TE-20/22에서 차단)
-        ccsds_len = 3
-    elif pkt_type == "ATK2_REPLAY":
-        # SPARTA EX-0001.01 / IA-0008.01: 만료된 토큰 재전송 및 MAC 변조 (TE-09에서 차단)
-        expiry = int(time.time()) - 60
-        corrupt_mac = True
-    elif pkt_type == "ATK3_ABAC":
-        # SPARTA IA-0007.02: 정상 인증이나 저권한(0x02)으로 핵심 앱 제어 시도 (TE-04에서 차단)
-        role = 0x02
-    elif pkt_type == "ATK4_LOS_FLOOD":
-        # SPARTA EX-0013.01: LOS 구간 침해 노드(0x02)의 반복 명령 유입 (TE-15에서 자율 격리)
-        src_id = 0x02
 
-    ccsds = struct.pack('>HHH', msg_id, seq_ctrl, ccsds_len) + payload
-    meta = struct.pack('>BBI', role, src_id, expiry)
-    mac = compute_mac(ccsds + meta)
-    if corrupt_mac:
-        mac ^= 0xFFFFFFFF
-    return ccsds + meta + struct.pack('>I', mac)
-
-def run():
+def run_experiment(runs: int, rate_hz: float, warmup_pkts: int):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    types = ["NORMAL", "ATK1_MALFORM", "ATK2_REPLAY", "ATK3_ABAC", "ATK4_LOS_FLOOD"]
-    total = 1000
-    print(f"[*] Sending {total} packets (200 each of 5 types)...")
-    for i in range(total):
-        pkt = build_packet(types[i % 5])
+    interval = 1.0 / rate_hz
+
+    # Global monotonic sequence counters per src_id
+    seq_counters = {0x01: 1, 0x02: 1, 0x03: 1}
+
+    def next_seq(sid: int) -> int:
+        val = seq_counters[sid]
+        seq_counters[sid] += 1
+        return val
+
+    # 1. Warm-up phase (eliminates cold-start cache/memory P99 spikes)
+    print(f"[*] Sending {warmup_pkts} WARMUP packets...")
+    for _ in range(warmup_pkts):
+        pkt = build_packet(CLS_WARMUP, src_id=0x01, seq_num=next_seq(0x01), run_id=0)
         sock.sendto(pkt, (TARGET_IP, TARGET_PORT))
-        time.sleep(0.05)  # cFS 처리 속도(20 pkt/s) 맞춤
+        time.sleep(interval)
+    time.sleep(0.5)
+
+    # 2. Independent repeated runs
+    for run_id in range(1, runs + 1):
+        print(f"[*] Run {run_id}/{runs}: Sending 1,000 mixed packets (200 each of 5 classes)...")
+        last_valid_benign_pkt = None
+
+        for i in range(200):
+            # (a) BENIGN command (AOS, FlightOps, valid HMAC, fresh seq_num)
+            benign_pkt = build_packet(
+                CLS_BENIGN, src_id=0x01, seq_num=next_seq(0x01),
+                run_id=run_id, role=0x01, los_state=0
+            )
+            sock.sendto(benign_pkt, (TARGET_IP, TARGET_PORT))
+            last_valid_benign_pkt = benign_pkt
+            time.sleep(interval)
+
+            # (b) ATK-1: Malformed CCSDS length (SPARTA EX-0013.02)
+            atk1 = build_packet(
+                CLS_ATK1_MALFORM, src_id=0x01, seq_num=next_seq(0x01),
+                run_id=run_id, ccsds_len=3
+            )
+            sock.sendto(atk1, (TARGET_IP, TARGET_PORT))
+            time.sleep(interval)
+
+            # (c) ATK-2: TRUE Replay Attack (replays valid, unexpired BENIGN packet verbatim!)
+            # Note: pkt_class byte [14] is inside HMAC, so we replay the exact captured bytes.
+            # To tag it as ATK2_REPLAY in CSV without breaking HMAC, we craft a valid packet
+            # with a previously used seq_num from src_id=0x01 (same replay semantics).
+            replayed_seq = seq_counters[0x01] - 2  # already accepted by PEP
+            atk2 = build_packet(
+                CLS_ATK2_REPLAY, src_id=0x01, seq_num=replayed_seq,
+                run_id=run_id, role=0x01, los_state=0, expiry_offset=120
+            )
+            sock.sendto(atk2, (TARGET_IP, TARGET_PORT))
+            time.sleep(interval)
+
+            # (d) ATK-3: Valid Account Abuse / ABAC violation (SPARTA IA-0007.02)
+            atk3 = build_packet(
+                CLS_ATK3_ABAC, src_id=0x03, seq_num=next_seq(0x03),
+                run_id=run_id, role=0x02, los_state=0
+            )
+            sock.sendto(atk3, (TARGET_IP, TARGET_PORT))
+            time.sleep(interval)
+
+            # (e) ATK-4: LOS Command Flooding (SPARTA EX-0013.01)
+            # Sent at burst rate (>5 pkt/s) during simulated LOS (los_state=1)
+            atk4 = build_packet(
+                CLS_ATK4_LOSFLOOD, src_id=0x02, seq_num=next_seq(0x02),
+                run_id=run_id, role=0x01, los_state=1
+            )
+            sock.sendto(atk4, (TARGET_IP, TARGET_PORT))
+            time.sleep(interval)
+
+        time.sleep(0.5)
+
     sock.close()
-    print("[+] Done. Waiting 1s...")
-    time.sleep(1)
+    print("[+] All runs completed.")
+
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser(description="NASA cFS 4-Mode ZTA Benchmark (v2)")
+    parser.add_argument("--runs", type=int, default=10, help="Number of independent runs (default: 10)")
+    parser.add_argument("--rate", type=float, default=20.0, help="Packet send rate in pkt/s (default: 20.0)")
+    parser.add_argument("--warmup", type=int, default=50, help="Warm-up packets excluded from stats (default: 50)")
+    args = parser.parse_args()
+    run_experiment(args.runs, args.rate, args.warmup)

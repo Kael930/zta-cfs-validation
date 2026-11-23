@@ -1,0 +1,81 @@
+diff --git a/fsw/src/ci_lab_app.c b/fsw/src/ci_lab_app.c
+index b25e58d..1349187 100644
+--- a/fsw/src/ci_lab_app.c
++++ b/fsw/src/ci_lab_app.c
+@@ -31,6 +31,12 @@
+ #include "ci_lab_version.h"
+ #include "ci_lab_decode.h"
+ 
++
++#define ZTA_PHASE_MODE 3
++#include "zta_pep.h"
++/* === [ZTA Experiment] End === */
++
++
+ /*
+ ** CI Global Data
+ */
+@@ -228,13 +234,17 @@ void CI_LAB_ResetCounters_Internal(void)
+ /* --                                                                         */
+ /*                                                                            */
+ /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * **/
++
+ void CI_LAB_ReadUpLink(void)
+ {
+     int   i;
+     int32 OsStatus;
++    int   raw_len; /* 수정 */
+ 
+     CFE_Status_t     CfeStatus;
+     CFE_SB_Buffer_t *SBBufPtr;
++    struct timespec  t_start, t_end;
++    double           latency_us;
+ 
+     for (i = 0; i <= CI_LAB_PLATFORM_MAX_INGEST_PKTS; i++)
+     {
+@@ -255,7 +265,28 @@ void CI_LAB_ReadUpLink(void)
+                                      CI_LAB_PLATFORM_UPLINK_RECEIVE_TIMEOUT);
+         if (OsStatus > 0)
+         {
++	    raw_len = (int)OsStatus; /* 추가 패킷 길이 보존 */
++            clock_gettime(CLOCK_MONOTONIC, &t_start);
+             CFE_ES_PerfLogEntry(CI_LAB_SOCKET_RCV_PERF_ID);
++
++const char *zta_reason = "PASS";
++            if (!ZTA_EvaluatePacket((const uint8_t *)CI_LAB_Global.NetBufPtr, raw_len, &zta_reason))
++            {
++                CI_LAB_Global.HkTlm.Payload.IngestErrors++;
++                CFE_ES_PerfLogExit(CI_LAB_SOCKET_RCV_PERF_ID);
++                clock_gettime(CLOCK_MONOTONIC, &t_end);
++
++                latency_us = (t_end.tv_sec - t_start.tv_sec) * 1e6 +
++                             (t_end.tv_nsec - t_start.tv_nsec) / 1e3;
++		ZTA_LogResult((const uint8_t *)CI_LAB_Global.NetBufPtr, raw_len, "BLOCKED", zta_reason, latency_us);
++                // ZTA_LogResult("BLOCKED", zta_reason, latency_us); 수정
++                continue;
++            }
++            if (OsStatus >= ZTA_TOTAL_LEN)
++            {
++                OsStatus = ZTA_CCSDS_LEN;
++            }
++
+             CfeStatus = CI_LAB_DecodeInputMessage(CI_LAB_Global.NetBufPtr, OsStatus, &SBBufPtr);
+             if (CfeStatus != CFE_SUCCESS)
+             {
+@@ -267,10 +298,15 @@ void CI_LAB_ReadUpLink(void)
+                 CfeStatus = CFE_SB_TransmitBuffer(SBBufPtr, false);
+             }
+             CFE_ES_PerfLogExit(CI_LAB_SOCKET_RCV_PERF_ID);
++            clock_gettime(CLOCK_MONOTONIC, &t_end);
++
++            latency_us = (t_end.tv_sec - t_start.tv_sec) * 1e6 +
++                         (t_end.tv_nsec - t_start.tv_nsec) / 1e3;
++	    ZTA_LogResult((const uint8_t *)CI_LAB_Global.NetBufPtr, raw_len, CfeStatus == CFE_SUCCESS ? "ALLOWED" : "DECODE_ERR", zta_reason, latency_us);
++            // ZTA_LogResult(CfeStatus == CFE_SUCCESS ? "ALLOWED" : "DECODE_ERR", zta_reason, latency_us);
+ 
+             if (CfeStatus == CFE_SUCCESS)
+             {
+-                /* Set NULL so a new buffer will be obtained next time around */
+                 CI_LAB_Global.NetBufPtr  = NULL;
+                 CI_LAB_Global.NetBufSize = 0;
+             }
