@@ -33,7 +33,7 @@ python3 scripts/analyze_4mode.py --data-dir data
 | **Mode 0** | Baseline (No Onboard PEP) | 100.00% (0.00%) | 100.00% (8,000/8,000) | 2.659 | — | 13.833 | 8.099 ± 51.951 | 57.463 | — |
 | **Mode 1** | Input Validation (`TE-20/22`) | 100.00% (0.00%) | 75.00% (6,000/8,000) | 2.814 | +0.155 µs | 15.533 | 7.892 ± 41.175 | 37.081 | 0.110 |
 | **Mode 2** | + HMAC-SHA-256, Anti-Replay, ABAC (`TE-09/04`) | 100.00% (0.00%) | 25.00% (2,000/8,000) | 6.447 | +3.788 µs | 16.980 | 8.711 ± 18.842 | 28.593 | 3.311 |
-| **Mode 3** | + Generalized LOS Auto-Isolation (`TE-15`) | 100.00% (0.00%) | **0.27%** (22/8,000) | **8.828** | **+6.168 µs** | **21.230** | **12.470 ± 24.736** | 130.652 | 3.677 |
+| **Mode 3** | + Generalized LOS Auto-Isolation (`TE-15`) | 100.00% (0.00%) | **0.28%** (22/8,000; exact 0.275%) | **8.828** | **+6.168 µs** | **21.230** | **12.470 ± 24.736** | 130.652 | 3.677 |
 
 *Notes:*
 - `APR` (Attack Pass Rate) is reported separately from the architectural model's `ASR` to distinguish controlled cFS packet-filtering measurements from analytical risk estimates.
