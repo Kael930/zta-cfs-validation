@@ -12,33 +12,18 @@
 #define ZTA_PHASE_MODE 0
 #endif
 
-/*
- * Packet Layout (64 Bytes):
- *   [0..11]  CCSDS Telecommand (Primary 6B + Payload 6B)
- *   [12]     role      (0x01=FlightOps, 0x02=LowPriv)
- *   [13]     src_id    (0x01..0xFF, sender identifier)
- *   [14]     pkt_class (logging tag only; NEVER used in security decision)
- *                      0=WARMUP, 1=BENIGN, 2=ATK1_MALFORM, 3=ATK2_REPLAY,
- *                      4=ATK3_ABAC, 5=ATK4_LOS_FLOOD
- *   [15]     los_state (0=AOS, 1=LOS)
- *   [16..23] seq_num   (uint64 BE, monotonic anti-replay counter per src_id)
- *   [24..27] expiry    (uint32 BE, Unix timestamp)
- *   [28..31] run_id    (uint32 BE, experiment repetition index for logging)
- *   [32..63] hmac      (32B HMAC-SHA-256 over bytes 0..31)
- */
 #define ZTA_CCSDS_LEN       12
 #define ZTA_HEADER_AUTH_LEN 32
 #define ZTA_HMAC_LEN        32
 #define ZTA_TOTAL_LEN       (ZTA_HEADER_AUTH_LEN + ZTA_HMAC_LEN)
 
-/* Generalized Mode 3 (TE-15) Time-Window Rate Limit under LOS */
-#define ZTA_LOS_WINDOW_SEC  1.0
-#define ZTA_LOS_MAX_PKTS    5
+/* Defaults (overridable via env vars ZTA_LOS_POLICY and ZTA_LOS_MAX_PKTS) */
+#define ZTA_LOS_WINDOW_SEC      1.0
+#define ZTA_LOS_MAX_PKTS_DEF    5
+#define ZTA_LOS_POLICY_CLOSED   0   /* Ground-Dependent Fail-Closed */
+#define ZTA_LOS_POLICY_OPEN     1   /* Ground-Dependent Fail-Open   */
+#define ZTA_LOS_POLICY_HYBRID   2   /* Proposed Hybrid ZTA          */
 
-/* =========================================================================
- * Minimal Self-Contained SHA-256 & HMAC-SHA-256 (FIPS 180-4 / RFC 2104)
- * Zero external library dependency for clean cFS flight-software builds.
- * ========================================================================= */
 #if ZTA_PHASE_MODE >= 2
 
 typedef struct {
@@ -177,7 +162,6 @@ static inline void ZTA_HMAC_SHA256(const uint8_t *key, size_t key_len,
     zta_sha256_final(&ctx, out_mac);
 }
 
-/* Constant-time MAC comparison to prevent timing side-channels */
 static inline int ZTA_ConstTimeEqual(const uint8_t *a, const uint8_t *b, size_t len) {
     uint8_t diff = 0;
     size_t i;
@@ -198,7 +182,6 @@ static inline const uint8_t *ZTA_GetKey(size_t *out_len) {
             if (key_len > sizeof(key_buf)) key_len = sizeof(key_buf);
             memcpy(key_buf, env_key, key_len);
         } else {
-            /* Testbed fallback only if ZTA_HMAC_KEY is not exported */
             const char *fallback = "ZTA_TESTBED_DEFAULT_KEY_CHANGE_ME";
             key_len = strlen(fallback);
             memcpy(key_buf, fallback, key_len);
@@ -211,19 +194,24 @@ static inline const uint8_t *ZTA_GetKey(size_t *out_len) {
 
 #endif /* ZTA_PHASE_MODE >= 2 */
 
-/* =========================================================================
- * CSV Logging (Expanded Schema for Independent Verification)
- * ========================================================================= */
 static FILE *zta_csv_fp = NULL;
 
 static inline const char *ZTA_ClassName(uint8_t cls) {
     switch (cls) {
-        case 0: return "WARMUP";
-        case 1: return "BENIGN";
-        case 2: return "ATK1_MALFORM";
-        case 3: return "ATK2_REPLAY";
-        case 4: return "ATK3_ABAC";
-        case 5: return "ATK4_LOS_FLOOD";
+        case 0:  return "WARMUP";
+        case 1:  return "BENIGN";
+        case 2:  return "ATK1_MALFORM";
+        case 3:  return "ATK2_REPLAY";
+        case 4:  return "ATK3_ABAC";
+        case 5:  return "ATK4_LOS_FLOOD";
+        case 6:  return "AOS_BENIGN";
+        case 7:  return "AOS_UNAUTH";
+        case 8:  return "LOS_BENIGN_VALID";
+        case 9:  return "LOS_BENIGN_EXPIRED";
+        case 10: return "LOS_UNAUTH";
+        case 11: return "LOS_FLOOD";
+        case 12: return "AOS_RECOVERY";
+        case 13: return "LOS_BURST_BENIGN";
         default: return "UNKNOWN";
     }
 }
@@ -250,12 +238,17 @@ static inline void ZTA_LogResult(const uint8_t *buf, int len,
     }
 
     if (zta_csv_fp == NULL) {
-        const char *log_dir = getenv("ZTA_LOG_DIR");
-        if (log_dir == NULL || strlen(log_dir) == 0) {
-            log_dir = "/home/yjcho/zta_exp";
-        }
+        const char *custom_csv = getenv("ZTA_CSV_FILE");
         char fname[256];
-        snprintf(fname, sizeof(fname), "%s/cfs_mode%d_v2.csv", log_dir, ZTA_PHASE_MODE);
+        if (custom_csv != NULL && strlen(custom_csv) > 0) {
+            snprintf(fname, sizeof(fname), "%s", custom_csv);
+        } else {
+            const char *log_dir = getenv("ZTA_LOG_DIR");
+            if (log_dir == NULL || strlen(log_dir) == 0) {
+                log_dir = "/home/yjcho/zta_exp";
+            }
+            snprintf(fname, sizeof(fname), "%s/cfs_mode%d_v2.csv", log_dir, ZTA_PHASE_MODE);
+        }
         zta_csv_fp = fopen(fname, "w");
         if (zta_csv_fp != NULL) {
             fprintf(zta_csv_fp, "run_id,mode,pkt_class,src_id,seq_num,los_state,status,reason,latency_us\n");
@@ -271,9 +264,6 @@ static inline void ZTA_LogResult(const uint8_t *buf, int len,
     }
 }
 
-/* =========================================================================
- * Anti-Replay Sliding Window (64-bit bitmap per src_id)
- * ========================================================================= */
 #if ZTA_PHASE_MODE >= 2
 typedef struct {
     uint8_t  initialized;
@@ -283,7 +273,6 @@ typedef struct {
 
 static ZTA_ReplayState zta_replay_tbl[256];
 
-/* Returns 1 if fresh (accepted), 0 if replay/stale (blocked) */
 static inline int ZTA_CheckAndUpdateReplay(uint8_t src_id, uint64_t seq) {
     ZTA_ReplayState *st = &zta_replay_tbl[src_id];
     if (!st->initialized) {
@@ -304,20 +293,17 @@ static inline int ZTA_CheckAndUpdateReplay(uint8_t src_id, uint64_t seq) {
     }
     uint64_t diff = st->max_seq - seq;
     if (diff >= 64ULL) {
-        return 0; /* Too old */
+        return 0;
     }
     uint64_t bit = 1ULL << diff;
     if (st->window_mask & bit) {
-        return 0; /* Duplicate replay */
+        return 0;
     }
     st->window_mask |= bit;
     return 1;
 }
 #endif
 
-/* =========================================================================
- * Generalized Autonomous LOS Rate-Limiter / Isolation (All src_ids)
- * ========================================================================= */
 #if ZTA_PHASE_MODE >= 3
 typedef struct {
     double   win_start_sec;
@@ -326,18 +312,43 @@ typedef struct {
 } ZTA_SrcRateState;
 
 static ZTA_SrcRateState zta_rate_tbl[256];
+static uint8_t zta_los_dirty = 0;
 
 static inline double ZTA_MonotonicSec(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
+
+static inline int ZTA_GetLosPolicy(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("ZTA_LOS_POLICY");
+        if (env != NULL && strlen(env) > 0) {
+            cached = atoi(env);
+            if (cached < 0 || cached > 2) cached = ZTA_LOS_POLICY_HYBRID;
+        } else {
+            cached = ZTA_LOS_POLICY_HYBRID;
+        }
+    }
+    return cached;
+}
+
+static inline uint32_t ZTA_GetLosMaxPkts(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("ZTA_LOS_MAX_PKTS");
+        if (env != NULL && strlen(env) > 0) {
+            int v = atoi(env);
+            cached = (v > 0) ? v : ZTA_LOS_MAX_PKTS_DEF;
+        } else {
+            cached = ZTA_LOS_MAX_PKTS_DEF;
+        }
+    }
+    return (uint32_t)cached;
+}
 #endif
 
-/*
- * Main Onboard PEP Evaluation Function
- * Returns: 1 = ALLOWED (forward to cFS Software Bus), 0 = BLOCKED (early drop)
- */
 static inline int ZTA_EvaluatePacket(const uint8_t *buf, int len, const char **out_reason)
 {
     *out_reason = "PASS";
@@ -347,7 +358,6 @@ static inline int ZTA_EvaluatePacket(const uint8_t *buf, int len, const char **o
     (void)len;
     return 1;
 #else
-    /* [Mode 1] TE-20 / TE-22: Input Validation & Format Sanitization */
     if (len < ZTA_TOTAL_LEN) {
         *out_reason = "TE20_22_LEN";
         return 0;
@@ -358,8 +368,22 @@ static inline int ZTA_EvaluatePacket(const uint8_t *buf, int len, const char **o
         return 0;
     }
 
+#if ZTA_PHASE_MODE >= 3
+    uint8_t los_state_pre = buf[15];
+    int     los_policy    = ZTA_GetLosPolicy();
+    if (los_state_pre == 1) {
+        if (los_policy == ZTA_LOS_POLICY_CLOSED) {
+            *out_reason = "LOS_FAIL_CLOSED";
+            return 0;
+        }
+        if (los_policy == ZTA_LOS_POLICY_OPEN) {
+            *out_reason = "LOS_FAIL_OPEN";
+            return 1;
+        }
+    }
+#endif
+
 #if ZTA_PHASE_MODE >= 2
-    /* [Mode 2] TE-09: HMAC-SHA-256 Authentication + Expiry + True Anti-Replay */
     uint8_t  src_id = buf[13];
     uint64_t seq    = ((uint64_t)buf[16] << 56) | ((uint64_t)buf[17] << 48) |
                       ((uint64_t)buf[18] << 40) | ((uint64_t)buf[19] << 32) |
@@ -386,7 +410,6 @@ static inline int ZTA_EvaluatePacket(const uint8_t *buf, int len, const char **o
         return 0;
     }
 
-    /* [Mode 2] TE-04: Attribute-Based Dynamic Access Control (Role vs MsgID) */
     uint16_t msg_id = ((uint16_t)buf[0] << 8) | buf[1];
     uint8_t  role   = buf[12];
     if (msg_id == 0x1880 && role != 0x01) {
@@ -396,10 +419,9 @@ static inline int ZTA_EvaluatePacket(const uint8_t *buf, int len, const char **o
 #endif
 
 #if ZTA_PHASE_MODE >= 3
-    /* [Mode 3] TE-15: Generalized Autonomous Software Isolation during LOS */
-    uint8_t los_state = buf[15];
-    if (los_state == 1) {
+    if (los_state_pre == 1) {
         ZTA_SrcRateState *rs = &zta_rate_tbl[src_id];
+        zta_los_dirty = 1;
         if (rs->quarantined) {
             *out_reason = "TE15_ISOL";
             return 0;
@@ -410,12 +432,16 @@ static inline int ZTA_EvaluatePacket(const uint8_t *buf, int len, const char **o
             rs->win_count     = 1;
         } else {
             rs->win_count++;
-            if (rs->win_count > ZTA_LOS_MAX_PKTS) {
+            if (rs->win_count > ZTA_GetLosMaxPkts()) {
                 rs->quarantined = 1;
                 *out_reason = "TE15_ISOL";
                 return 0;
             }
         }
+    } else if (role == 0x01 && zta_los_dirty) {
+        memset(zta_rate_tbl, 0, sizeof(zta_rate_tbl));
+        zta_los_dirty = 0;
+        *out_reason = "AOS_RESYNC";
     }
 #endif
 
