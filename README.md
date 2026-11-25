@@ -36,7 +36,7 @@ This repository archives the self-contained C onboard Policy Enforcement Point (
 
 ## 3. Summary of Experimental Results
 
-### 3.1 Progressive Four-Mode Attenuation & Host Latency (10 Independent Runs)
+### 3.1 Progressive Four-Mode Attenuation & Host Latency (10 Consecutive Measurement Batches)
 - **Workload:** 50-packet warm-up excluded; 10,000 measured packets/mode at 20 pkt/s (2,000 `BENIGN` + 8,000 balanced 4-class SPARTA-derived malicious telecommands: ATK-1 `EX-0013.02`, ATK-2 `EX-0001.01`/`IA-0008.01`, ATK-3 `IA-0007.02`, ATK-4 `EX-0013.01`).
 - **Observed FPR:** **0.00%** across all modes (0 falsely rejected out of 2,000 benign commands per mode).
 
