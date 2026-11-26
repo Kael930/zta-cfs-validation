@@ -14,7 +14,7 @@ This repository archives the self-contained C onboard Policy Enforcement Point (
 - **Flight Software:** NASA Core Flight System (cFS) v7.0.1 (`CI_LAB` app, intercepted inside `CI_LAB_ReadUpLink()` prior to `CFE_SB_TransmitBuffer`)
 - **Host Environment:** Ubuntu 22.04.5 LTS, Intel Core i7-14700, 16 GB RAM, GCC 11.4.0
 - **Cryptographic Implementation:** Self-contained FIPS 180-4 / RFC 2104 HMAC-SHA-256 with constant-time digest comparison, zero external library dependencies, and zero dynamic heap allocation in the command-processing hot path.
-- **Metrics Convention:** Testbed packet-filtering outcomes are reported as exact packet pass counts (`Passed/Sent`) and **Attack Pass Rate (APR)** alongside observed benign drops (**FPR**), remaining strictly distinct from the analytical risk model's **Attack Success Rate (ASR)**.
+- **Metrics Convention:** Testbed packet-filtering outcomes are reported directly as exact packet pass counts (`forwarded/sent`) and flooding pass rates alongside observed benign drops (**FPR**), remaining strictly distinct from the analytical risk model's **Attack Success Rate (ASR)**.
 
 ---
 
@@ -88,7 +88,7 @@ This repository archives the self-contained C onboard Policy Enforcement Point (
 
 ### 3.4 Section VII-D: Benign Burst Tolerance & Post-Quarantine AOS Recovery (5 Consecutive AOS-Reset Cycles per $T$)
 
-| Threshold $T$ (pkt/s) | $B=3$ Passed | $B=5$ Passed | $B=8$ Passed | $B=12$ Passed | ATK-4 Flood Passed (APR) | AOS Recovery |
+| Threshold $T$ (pkt/s) | $B=3$ Passed | $B=5$ Passed | $B=8$ Passed | $B=12$ Passed | ATK-4 Flood Passed (Rate) | AOS Recovery |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **5** | 15/15 | 25/25 | 25/40 (62.5%) | 25/60 (41.7%) | 25/1,000 (2.5%) | 5/5 cyc. |
 | **10** | 15/15 | 25/25 | 40/40 | 50/60 (83.3%) | 50/1,000 (5.0%) | 5/5 cyc. |
