@@ -14,7 +14,7 @@ This repository archives the self-contained C onboard Policy Enforcement Point (
 - **Flight Software:** NASA Core Flight System (cFS) v7.0.1 (`CI_LAB` app, intercepted inside `CI_LAB_ReadUpLink()` prior to `CFE_SB_TransmitBuffer`)
 - **Host Environment:** Ubuntu 22.04.5 LTS, Intel Core i7-14700, 16 GB RAM, GCC 11.4.0
 - **Cryptographic Implementation:** Self-contained FIPS 180-4 / RFC 2104 HMAC-SHA-256 with constant-time digest comparison, zero external library dependencies, and zero dynamic heap allocation in the command-processing hot path.
-- **Metrics Convention:** Testbed packet-filtering results are reported as **Attack Pass Rate (APR)** and **False Positive Rate (FPR)** to remain strictly distinct from the analytical risk model's **Attack Success Rate (ASR)**.
+- **Metrics Convention:** Testbed packet-filtering outcomes are reported as exact packet pass counts (`Passed/Sent`) and **Attack Pass Rate (APR)** alongside observed benign drops (**FPR**), remaining strictly distinct from the analytical risk model's **Attack Success Rate (ASR)**.
 
 ---
 
@@ -36,18 +36,28 @@ This repository archives the self-contained C onboard Policy Enforcement Point (
 
 ## 3. Summary of Experimental Results
 
-### 3.1 Section VII-B: Progressive Four-Mode Attenuation & Host Latency (10 Consecutive Measurement Batches)
-- **Workload:** 50-packet warm-up excluded; 10 consecutive measurement batches (1,000 packets/batch; 10,000 measured packets/mode at 20 pkt/s) within a single continuous cFS execution without resetting stateful PEP tables between batches: 2,000 `BENIGN` + 8,000 balanced 4-class SPARTA-derived malicious telecommands (ATK-1 `EX-0013.02`, ATK-2 `EX-0001.01`/`IA-0008.01`, ATK-3 `IA-0007.02`, ATK-4 `EX-0013.01`).
-- **Observed FPR:** **0.00%** across all modes (0 falsely rejected out of 2,000 benign commands per mode).
+### 3.1 Section VII-B: Progressive Four-Mode Coverage & Host Processing Overhead (10 Consecutive Measurement Batches)
+- **Workload:** 50-packet warm-up excluded; 10 consecutive measurement batches (1,000 packets/batch; 10,000 measured packets/mode at 20 pkt/s) within a single continuous cFS execution without resetting stateful PEP tables between batches: 2,000 `BENIGN` + 8,000 SPARTA-derived malicious telecommands (2,000 each: ATK-1 `EX-0013.02`, ATK-2 `EX-0001.01`/`IA-0008.01`, ATK-3 `IA-0007.02`, ATK-4 `EX-0013.01`).
+- **Observed Benign Drops (FPR):** **0/2,000** across all four modes.
 
-| PEP Mode | Active Onboard Controls | Overall APR (%) | Benign Med. (µs) | ΔMed. (µs) | P95 (µs) | Mean ± Std (µs) | P99 (µs) | Early-Drop Med. (µs) |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Mode 0:** Baseline | None onboard (Perimeter bypass) | 100.00 | 2.659 | — | 13.833 | 8.099 ± 51.951 | 57.463 | — |
-| **Mode 1:** Input Val. | TE-20, TE-22 (CCSDS format check) | 75.00 | 2.814 | +0.155 | 15.533 | 7.892 ± 41.175 | 37.081 | 0.110 |
-| **Mode 2:** Auth + ABAC | + TE-09, TE-04 (HMAC-SHA-256, Replay, ABAC) | 25.00 | 6.447 | +3.788 | 16.980 | 8.711 ± 18.842 | 28.593 | 3.311 |
-| **Mode 3:** Auto-Isol. | + TE-15a (Generalized LOS rate quarantine, $T=5$) | **0.28** *(0.275)* | **8.828** | **+6.168** | **21.230** | **12.470 ± 24.736** | 130.652 | 3.677 |
+| PEP Mode | Active Onboard Controls | Mitigated Classes | Benign Med. (µs) | ΔMed. (µs) | Benign P95 (µs) | Early-Drop Med. (µs) |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **Mode 0:** Baseline | None onboard (Perimeter bypass) | 0/4 | 2.659 | — | 13.833 | — |
+| **Mode 1:** Input Val. | TE-20, TE-22 (CCSDS format check) | 1/4 (ATK-1) | 2.814 | +0.155 | 15.533 | 0.110 |
+| **Mode 2:** Auth + ABAC | + TE-09, TE-04 (HMAC-SHA-256, Replay, ABAC) | 3/4 (ATK-1–3) | 6.447 | +3.788 | 16.980 | 3.311 |
+| **Mode 3:** Auto-Isol. | + TE-15a (Generalized LOS rate quarantine, $T=5$) | **4/4 (ATK-1–4†)** | **8.828** | **+6.168** | **21.230** | **3.677** |
 
-*Per-attack APR in Mode 3: ATK-1 = 0.00%, ATK-2 = 0.00%, ATK-3 = 0.00%, ATK-4 = 1.10% (22/200 initial flooding packets passed in Batch 1 prior to persistent quarantine activation; 0/1,800 passed across Batches 2–10).*
+*Robust percentiles (Median and P95) are reported over the identical 2,000 `BENIGN` commands per mode because occasional OS scheduling preemptions on the non-real-time Linux host introduce heavy-tailed outliers (full per-packet logs are archived in the CSV datasets). †Per-attack packet pass counts (`Passed/Sent`) across Modes 0–3:*
+
+| Attack Class (SPARTA Ref.) | M0 | M1 | M2 | M3 | Validated Control Subset |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **ATK-1** (`EX-0013.02`, Malformed CCSDS) | 2,000/2,000 | 0/2,000 | 0/2,000 | 0/2,000 | TE-20, TE-22 (frame subset) |
+| **ATK-2** (`EX-0001.01`/`IA-0008.01`, Replay) | 2,000/2,000 | 2,000/2,000 | 0/2,000 | 0/2,000 | TE-09 (HMAC + 64-b window) |
+| **ATK-3** (`IA-0007.02`, Low-Priv `0x1880`) | 2,000/2,000 | 2,000/2,000 | 0/2,000 | 0/2,000 | TE-04 (role-to-`MsgID` ABAC) |
+| **ATK-4** (`EX-0013.01`, LOS Valid Flood) | 2,000/2,000 | 2,000/2,000 | 2,000/2,000 | 22/2,000 (1.1%) | TE-15a (reversible quarantine) |
+| **Total Malicious (8,000 / Mode)** | **8,000/8,000** | **6,000/8,000** | **2,000/8,000** | **22/8,000** | **Component Verification** |
+
+*Modes 1–2 enforce deterministic format, cryptographic, anti-replay, and ABAC rules (complete rejection of targeted classes), whereas Mode 3 enforces a stateful rate window ($T=5$ pkt/s) that permits 22 initial `ATK-4` packets in Batch 1 before triggering persistent quarantine (0/1,800 passed across Batches 2–10).*
 
 ---
 
@@ -60,29 +70,31 @@ This repository archives the self-contained C onboard Policy Enforcement Point (
 | **Mode 2 (Auth + ABAC)** | 17,962 | 960 | 6,416 | 25,338 | +4,978 | +11,258 B (+10.99 KiB) |
 | **Mode 3 (Auto-Isol.)** | 18,423 | 960 | 10,512 | 29,895 | +5,439 | +15,815 B (+15.44 KiB) |
 
-*Values report static ELF section sizes (distinct from runtime stack/heap). Static tables account for 10,240 B in Mode 3 (`zta_replay_tbl`: 6,144 B / 6.00 KiB; `zta_rate_tbl`: 4,096 B / 4.00 KiB), measured on the baseline four-mode PEP build (`v2.0`) prior to adding the `v2.1` runtime policy/threshold switches (`ZTA_LOS_POLICY`, `ZTA_LOS_MAX_PKTS`).*
+*Values report static ELF section sizes (distinct from runtime stack/heap). Static tables account for 10,240 B in Mode 3 (`zta_replay_tbl`: 6,144 B / 6.00 KiB; `zta_rate_tbl`: 4,096 B / 4.00 KiB), measured on the baseline four-mode PEP build (`v2.0`) prior to adding the `v2.1` runtime policy/threshold flags (`ZTA_LOS_POLICY`, `ZTA_LOS_MAX_PKTS`).*
 
 ---
 
 ### 3.3 Section VII-C: Comparative LOS Policy Enforcement (10 Consecutive AOS–LOS–AOS Cycles)
-- **Workload:** 50-packet warm-up excluded; 10 consecutive AOS–LOS–AOS cycles within a continuous cFS execution with per-cycle authenticated FlightOps AOS quarantine resets (5,000 measured packets/policy at 20 pkt/s: 200 AOS benign, 200 AOS unauth, 500 LOS valid benign at 2.5 pkt/s, 500 LOS expired benign, 1,000 LOS unauth [500 replay + 500 ABAC], 2,000 LOS flood, and 600 AOS recovery commands).
-- **Baselines:** Fail-Closed (`ZTA_LOS_POLICY=0`) and Fail-Open (`ZTA_LOS_POLICY=1`) represent intentionally simplified boundary policies for controlled comparison against Proposed Hybrid ZTA (`ZTA_LOS_POLICY=2`).
+- **Workload:** 50-packet warm-up excluded; 10 consecutive AOS–LOS–AOS cycles within a continuous cFS execution with per-cycle authenticated FlightOps AOS quarantine resets (5,000 measured packets/policy at 20 pkt/s: 200 AOS benign, 200 AOS unauth [0/200 passed across all policies], 500 LOS valid benign at 2.5 pkt/s, 500 LOS expired benign, 1,000 LOS unauth [500 replay + 500 ABAC], 2,000 LOS flood, and 600 AOS recovery commands).
+- **Baselines:** Fail-Closed (`ZTA_LOS_POLICY=0`) and Fail-Open (`ZTA_LOS_POLICY=1`) represent intentionally simplified boundary policies for controlled comparison against the proposed hybrid ZTA policy (`ZTA_LOS_POLICY=2`).
 
-| LOS Policy (`ZTA_LOS_POLICY`) | AOS Benign Pass | LOS Valid Pass | LOS Expired Reject | LOS Unauth Pass | LOS Flood Pass | AOS Recovery | LOS Valid Med. (µs) |
+| LOS Policy (`ZTA_LOS_POLICY`) | AOS Benign Forwarded | LOS Valid Forwarded | LOS Expired Rejected | LOS Unauth Passed | LOS Flood Passed | AOS Recovery | LOS Valid Med. (µs) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Fail-Closed (`0`)** | 100.00% | **0.00%** | 100.00% | 0.00% | 0.00% | 100.00% | 0.031 *(drop)* |
-| **Fail-Open (`1`)** | 100.00% | 100.00% | **0.00%** | **100.00%** | **100.00%** | 100.00% | 1.923 |
-| **Hybrid ZTA (`2`, $T=5$)** | **100.00%** | **100.00%** | **100.00%** | **0.00%** | **2.50%** | **100.00%** | **14.242** |
+| **Fail-Closed (`0`)** | 200/200 | **0/500** | 500/500 | 0/1,000 | 0/2,000 | 600/600 | 0.031 *(drop)* |
+| **Fail-Open (`1`)** | 200/200 | 500/500 | **0/500** | **1,000/1,000** | **2,000/2,000** | 600/600 | 1.923 |
+| **Hybrid ZTA (`2`, $T=5$)** | **200/200** | **500/500** | **500/500** | **0/1,000** | **50/2,000 (2.5%)** | **600/600** | **14.242** |
 
 ---
 
-### 3.4 Section VII-D: Benign Burst Sensitivity & Post-Quarantine AOS Recovery (5 Consecutive AOS-Reset Cycles per $T$)
+### 3.4 Section VII-D: Benign Burst Tolerance & Post-Quarantine AOS Recovery (5 Consecutive AOS-Reset Cycles per $T$)
 
-| Threshold $T$ (pkt/s) | $B=3$ Pass | $B=5$ Pass | $B=8$ Pass | $B=12$ Pass | ATK-4 Flood Pass (1,000) | AOS Forwarding Recovery |
+| Threshold $T$ (pkt/s) | $B=3$ Passed | $B=5$ Passed | $B=8$ Passed | $B=12$ Passed | ATK-4 Flood Passed (APR) | AOS Recovery |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **5** | 100.00% | 100.00% | 62.50% *(15/40 blocked)* | 41.67% *(35/60 blocked)* | 2.50% *(25/1,000)* | 100.00% |
-| **10** | 100.00% | 100.00% | 100.00% | 83.33% *(10/60 blocked)* | 5.00% *(50/1,000)* | 100.00% |
-| **20** | 100.00% | 100.00% | 100.00% | 100.00% | 10.00% *(100/1,000)* | 100.00% |
+| **5** | 15/15 | 25/25 | 25/40 (62.5%) | 25/60 (41.7%) | 25/1,000 (2.5%) | 5/5 cyc. |
+| **10** | 15/15 | 25/25 | 40/40 | 50/60 (83.3%) | 50/1,000 (5.0%) | 5/5 cyc. |
+| **20** | 15/15 | 25/25 | 40/40 | 60/60 | 100/1,000 (10.0%) | 5/5 cyc. |
+
+*Exact packet counts aggregated over 5 cycles per threshold (total burst commands: 15, 25, 40, and 60 for $B=3, 5, 8, 12$; total ATK-4 flood packets: 1,000). AOS recovery denotes full command-forwarding restoration after authenticated FlightOps resynchronization in all 5 cycles.*
 
 ---
 
